@@ -2,7 +2,7 @@
 edition = "2021"
 readme = "README.md"
 name = "embassy-st7789v-driver"
-version = "0.2.0"
+version = "1.2.0"
 description = "ST7789 TFT LCD embassy async driver with embedded-graphics support"
 license = "MIT"
 repository = "https://github.com/wendell1002/ST7789v-driver"
