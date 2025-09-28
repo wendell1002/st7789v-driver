@@ -3,6 +3,11 @@ edition = "2021"
 readme = "README.md"
 name = "st7789v-driver"
 version = "0.2.0"
+description = "ST7789 TFT LCD driver with embedded-graphics support"
+license = "MIT"
+repository = "https://github.com/wendell1002/ST7789v-driver"
+keywords = ["embedded-hal-driver", "st7789", "display", "on_std"]
+documentation = "https://docs.rs/st7789v-driver"
 
 [dependencies]
 embedded-graphics-core = "0.4.0"
