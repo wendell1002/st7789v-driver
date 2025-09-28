@@ -1,0 +1,28 @@
+[package]
+edition = "2021"
+readme = "README.md"
+name = "st7789v-driver"
+version = "0.2.0"
+
+[dependencies]
+embedded-graphics-core = "0.4.0"
+embedded-hal = "0.2.7"
+heapless = "0.7.17"
+[lib]
+path = "src/lib.rs"
+name = "st7789v_driver"
+test = false
+bench = false
+
+[profile.dev]
+codegen-units = 1
+debug = 2
+debug-assertions = true # <-
+incremental = false
+opt-level = 'z'         # <-
+overflow-checks = true  # <-
+
+[profile.release]
+codegen-units = 1 # better optimizations
+debug = true      # symbols are nice and they don't increase the size on Flash
+lto = true        # better optimizations
