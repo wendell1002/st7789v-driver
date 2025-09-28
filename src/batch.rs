@@ -1,20 +1,24 @@
 //! Original code from: https://github.com/lupyuen/piet-embedded/blob/master/piet-embedded-graphics/src/batch.rs
 //! Batch the pixels to be rendered into Pixel Rows and Pixel Blocks (contiguous Pixel Rows).
 //! This enables the pixels to be rendered efficiently as Pixel Blocks, which may be transmitted in a single Non-Blocking SPI request.
-use crate::st7789::st7789::ST7789;
-use embedded_graphics::{pixelcolor::Rgb565, prelude::*};
+use crate::st7789::ST7789;
+use embassy_futures::block_on;
 use embedded_graphics_core::pixelcolor::raw::RawU16;
-use embedded_hal::blocking::spi::*;
-use embedded_hal::digital::v2::OutputPin;
-pub trait DrawBatch<T>
+use embedded_graphics_core::{pixelcolor::Rgb565, prelude::*};
+use embedded_hal::digital::OutputPin;
+use embedded_hal_async::spi::SpiDevice;
+
+pub trait DrawBatch<SPI, T>
 where
+    SPI: SpiDevice,
     T: IntoIterator<Item = Pixel<Rgb565>>,
 {
     fn draw_batch(&mut self, item_pixels: T) -> Result<(), ()>;
 }
 
-impl<DC, CS, RST, BLK, T> DrawBatch<T> for ST7789<DC, CS, RST, BLK>
+impl<SPI, DC, CS, RST, BLK, T> DrawBatch<SPI, T> for ST7789<SPI, DC, CS, RST, BLK>
 where
+    SPI: SpiDevice,
     DC: OutputPin,
     CS: OutputPin,
     RST: OutputPin,
@@ -39,7 +43,8 @@ where
         } in blocks
         {
             //  Render the Pixel Block.
-            self.write_pixels(x_left, y_top, x_right, y_bottom, colors)?;
+            let fe = self.write_pixels(x_left, y_top, x_right, y_bottom, colors);
+            block_on(fe)?;
 
             //  Dump out the Pixel Blocks for the square in test_display()
             /* if x_left >= 60 && x_left <= 150 && x_right >= 60 && x_right <= 150 && y_top >= 60 && y_top <= 150 && y_bottom >= 60 && y_bottom <= 150 {

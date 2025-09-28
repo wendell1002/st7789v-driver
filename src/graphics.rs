@@ -1,12 +1,13 @@
-use embedded_graphics::{pixelcolor::Rgb565, prelude::*};
-use embedded_hal::blocking::spi::*;
-use embedded_hal::digital::v2::OutputPin;
+use embedded_graphics_core::{pixelcolor::Rgb565, prelude::*};
+use embedded_hal::digital::OutputPin;
+use embedded_hal_async::spi::SpiDevice;
 
-use crate::st7789::st7789::ST7789;
+use crate::st7789::ST7789;
 
 // Implementing the DrawTarget trait for the ST7789V2 display driver
-impl<DC, CS, RST, BLK> DrawTarget for ST7789<DC, CS, RST, BLK>
+impl<SPI, DC, CS, RST, BLK> DrawTarget for ST7789<SPI, DC, CS, RST, BLK>
 where
+    SPI: SpiDevice,
     DC: OutputPin,
     CS: OutputPin,
     RST: OutputPin,
@@ -19,7 +20,7 @@ where
     where
         I: IntoIterator<Item = Pixel<Self::Color>>,
     {
-        use crate::st7789::batch::DrawBatch;
+        use crate::batch::DrawBatch;
         self.draw_batch(pixels)
         // for Pixel(coord, color) in pixels.into_iter() {
         //     let color_value = color.into_storage();
@@ -37,8 +38,9 @@ where
 }
 
 // Implementing the OriginDimensions trait for the ST7789V2 display driver
-impl<DC, CS, RST, BLK> OriginDimensions for ST7789<DC, CS, RST, BLK>
+impl<SPI, DC, CS, RST, BLK> OriginDimensions for ST7789<SPI, DC, CS, RST, BLK>
 where
+    SPI: SpiDevice,
     DC: OutputPin,
     CS: OutputPin,
     RST: OutputPin,

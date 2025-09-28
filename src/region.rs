@@ -1,7 +1,7 @@
-use crate::st7789::cmd::Commands;
-use crate::st7789::st7789::ST7789;
-use embedded_hal::blocking::spi::*;
-use embedded_hal::digital::v2::OutputPin;
+use crate::cmd::Commands;
+use crate::st7789::ST7789;
+use embedded_hal::digital::OutputPin;
+use embedded_hal_async::spi::SpiDevice;
 
 /// Structure to represent a region.
 #[derive(Copy, Clone, Default, PartialEq, Eq)]
@@ -13,8 +13,8 @@ pub struct Region {
 }
 
 pub trait RegionExt {
-    fn show_regions_and_clear(&mut self, buffer: &[u8]) -> Result<(), ()>;
-    fn show_regions(&mut self, buffer: &[u8]) -> Result<(), ()>;
+    async fn show_regions_and_clear(&mut self, buffer: &[u8]) -> Result<(), ()>;
+    async fn show_regions(&mut self, buffer: &[u8]) -> Result<(), ()>;
     fn clear_regions(&mut self);
     fn get_regions(&self) -> &[Option<Region>];
     fn store_region_from_params(
@@ -25,7 +25,7 @@ pub trait RegionExt {
         height: u32,
     ) -> Result<(), ()>;
     fn store_region(&mut self, region: Region) -> Result<(), ()>;
-    fn show_region(
+    async fn show_region(
         &mut self,
         buffer: &[u8],
         top_left_x: u16,
@@ -35,8 +35,9 @@ pub trait RegionExt {
     ) -> Result<(), ()>;
 }
 
-impl<DC, CS, RST, BLK> RegionExt for ST7789<DC, CS, RST, BLK>
+impl<SPI, DC, CS, RST, BLK> RegionExt for ST7789<SPI, DC, CS, RST, BLK>
 where
+    SPI: SpiDevice,
     DC: OutputPin,
     CS: OutputPin,
     RST: OutputPin,
@@ -59,7 +60,7 @@ where
     /// # Returns
     ///
     /// `Result<(), ()>` indicating success (`Ok`) or failure (`Err`).
-    fn show_region(
+    async fn show_region(
         &mut self,
         buffer: &[u8],
         top_left_x: u16,
@@ -77,10 +78,11 @@ where
         let bytes_per_pixel = 2; // Number of bytes per pixel in RGB565 format
 
         // Set the address window for the region to be updated
-        self.set_address_window(start_x, start_y, end_x, end_y)?;
+        self.set_address_window(start_x, start_y, end_x, end_y)
+            .await?;
 
         // Send the command to write to RAM
-        self.write_command(Commands::RamWr as u8, &[])?;
+        self.write_command(Commands::RamWr as u8, &[]).await?;
 
         // Start data transmission
         self.start_data()?;
@@ -92,7 +94,7 @@ where
 
             // Write data to the display in chunks of 32 bytes
             for chunk in buffer[start_index..end_index].chunks(32) {
-                self.write_data(chunk)?;
+                self.write_data(chunk).await?;
             }
         }
 
@@ -134,7 +136,7 @@ where
         self.regions = [None; 10];
     }
 
-    fn show_regions(&mut self, buffer: &[u8]) -> Result<(), ()> {
+    async fn show_regions(&mut self, buffer: &[u8]) -> Result<(), ()> {
         for i in 0..self.regions.len() {
             if self.regions[i].is_some() {
                 if let Some(region_data) = self.regions[i] {
@@ -144,7 +146,8 @@ where
                         region_data.y,
                         region_data.width,
                         region_data.height,
-                    )?;
+                    )
+                    .await?;
                 }
             }
         }
@@ -153,8 +156,8 @@ where
     }
 
     // Additional function with default parameter
-    fn show_regions_and_clear(&mut self, buffer: &[u8]) -> Result<(), ()> {
-        if let Err(e) = self.show_regions(buffer) {
+    async fn show_regions_and_clear(&mut self, buffer: &[u8]) -> Result<(), ()> {
+        if let Err(e) = self.show_regions(buffer).await {
             // Handle the error, e.g., log it or return a different error
             return Err(e);
         }

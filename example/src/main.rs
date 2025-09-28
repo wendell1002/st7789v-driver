@@ -1,16 +1,28 @@
 #![no_std]
 #![no_main]
 
-use cortex_m_rt::entry;
-use defmt::info;
-use st7789v_driver::st7789::{Orientation, ST7789};
-// use defmt_rtt as _;
-use embedded_graphics::mono_font::ascii::{FONT_6X10, FONT_6X9};
-use embedded_graphics::pixelcolor::Rgb565;
+use core::convert::Infallible;
+
+use defmt::*;
+use embassy_executor::Spawner;
+use embassy_st7789v_driver::st7789::{Orientation, ST7789};
+use embassy_stm32::{
+    gpio::{Level, Output, Speed},
+    rcc::clocks,
+    spi::{self, Config, MisoPin, Spi},
+    time::Hertz,
+};
+use embassy_time::{Delay, Instant, Timer};
+use embedded_graphics::pixelcolor::{BinaryColor, Rgb565};
 use embedded_graphics::prelude::RgbColor as _;
+use embedded_graphics::prelude::RgbColor;
 use embedded_graphics::primitives::*;
 use embedded_graphics::primitives::{PrimitiveStyleBuilder, RoundedRectangle};
 use embedded_graphics::Drawable;
+use embedded_graphics::{
+    mono_font::ascii::{FONT_6X10, FONT_6X9},
+    prelude::DrawTargetExt,
+};
 use embedded_graphics::{mono_font::MonoTextStyleBuilder, primitives::PrimitiveStyle};
 use embedded_graphics::{
     mono_font::{ascii::FONT_9X15, iso_8859_15::FONT_10X20},
@@ -19,114 +31,111 @@ use embedded_graphics::{
     text::{Baseline, Text},
     Pixel,
 };
-use embedded_graphics_core::{draw_target::DrawTarget, prelude::RgbColor};
+use embedded_graphics_core::draw_target::DrawTarget;
+use embedded_hal::digital::{ErrorType, OutputPin};
+use embedded_hal_bus::spi::ExclusiveDevice;
 use heapless::String;
-// use panic_semihosting as _;
-use stm32f1xx_hal::pac::adc3::sqr1::R;
-use stm32f1xx_hal::pac::{self, SPI2};
-use stm32f1xx_hal::rcc;
-use stm32f1xx_hal::rtc::Rtc;
-use stm32f1xx_hal::spi::{Mode, Phase, Polarity};
-use stm32f1xx_hal::{prelude::*, time::MonoTimer};
 use {defmt_rtt as _, panic_probe as _};
-#[entry]
-fn main() -> ! {
-    //初始化和获取外设对象
-    // 获取cortex-m 相关的核心外设
-    let cp = cortex_m::Peripherals::take().unwrap();
-    //获取stm32f1xx_hal硬件外设
-    let dp = pac::Peripherals::take().unwrap();
-    // 初始化并获取flash和rcc设备的所有权
-    let mut flash = dp.FLASH.constrain();
-    //冻结系统中所有时钟的配置，并将冻结后的频率值存储在“clocks”中
-    // let clocks = rcc.cfgr.freeze(&mut flash.acr);
-    info!("init");
-    let sysclk = 72.MHz();
-    let pclk = sysclk / 2;
-    let mut rcc = dp.RCC.freeze(
-        rcc::Config::hse(8.MHz())
-            .sysclk(sysclk)
-            .pclk1(pclk)
-            .pclk2(sysclk)
-            .hclk(sysclk),
-        &mut flash.acr,
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let mut config = embassy_stm32::Config::default();
+    {
+        use embassy_stm32::rcc::*;
+        config.rcc.hse = Some(Hse {
+            freq: Hertz(8_000_000),
+            mode: HseMode::Oscillator,
+        });
+        config.rcc.pll = Some(Pll {
+            prediv: PllPreDiv::DIV1,
+            mul: PllMul::MUL9,
+            src: PllSource::HSE,
+        });
+        config.rcc.ahb_pre = AHBPrescaler::DIV1;
+        config.rcc.apb1_pre = APBPrescaler::DIV2;
+        config.rcc.apb2_pre = APBPrescaler::DIV1;
+        config.rcc.sys = Sysclk::PLL1_P;
+    }
+    let p = embassy_stm32::init(config);
+    info!("RCC: {:?}", clocks(&p.RCC));
+
+    let mut spi_config = Config::default();
+    spi_config.frequency = Hertz(18_000_000);
+    spi_config.mode = spi::Mode {
+        polarity: spi::Polarity::IdleLow,
+        phase: spi::Phase::CaptureOnFirstTransition,
+    };
+    spi_config.gpio_speed = Speed::VeryHigh;
+
+    let spi = Spi::new(
+        p.SPI2, p.PB13, p.PB15, p.PB14, p.DMA1_CH5, p.DMA1_CH4, spi_config,
     );
-    let clocks = rcc.clocks;
-    // dp.TIM3.monotonic_us(&mut rcc);
-    info!(
-        "sysclk:{:?},pclk1:{:?},pclk2:{:?},hclk:{:?},adcclk:{:?}",
-        clocks.sysclk().to_Hz(),
-        clocks.pclk1().to_Hz(),
-        clocks.pclk2().to_Hz(),
-        clocks.hclk().to_Hz(),
-        clocks.adcclk().to_Hz()
+
+    let cs = Output::new(p.PA10, Level::High, Speed::VeryHigh);
+    let dc = Output::new(p.PA9, Level::High, Speed::VeryHigh);
+    let rst = Output::new(p.PA8, Level::High, Speed::VeryHigh);
+    let blk = Output::new(p.PB12, Level::High, Speed::VeryHigh);
+    let delay = Delay;
+    let spi_device = ExclusiveDevice::new(spi, cs, delay).unwrap();
+    // let mut buffer = [0_u8; 512];
+    // let di = SpiInterface::new(spi_device, dc, &mut buffer);
+
+    // // create the ILI9486 display driver in rgb666 color mode from the display interface and use a HW reset pin during init
+    // let mut display = Builder::new(ST7789, di)
+    //     .display_size(135, 240)
+    //     .display_offset(52, 40)
+    //     .orientation(Orientation::new().rotate(mipidsi::options::Rotation::Deg90))
+    //     .invert_colors(mipidsi::options::ColorInversion::Inverted)
+    //     .reset_pin(rst)
+    //     .init(&mut Delay {})
+    //     .unwrap(); // delay provider from your MCU
+    //                // clear the display to black
+    // display.clear(Rgb565::BLACK).unwrap();
+
+    let mut display = ST7789::new(
+        spi_device,
+        dc,
+        NoCsPin,
+        Some(rst),
+        Some(blk),
+        true,
+        240,
+        135,
     );
-    let mut delay = dp.TIM3.delay_us(&mut rcc);
-    let mut afio = dp.AFIO.constrain(&mut rcc);
-    let mut gpioa = dp.GPIOA.split(&mut rcc);
-    let mut gpioc = dp.GPIOC.split(&mut rcc);
-    let mut gpiob = dp.GPIOB.split(&mut rcc);
+    display
+        .set_orientation(Orientation::Landscape)
+        .await
+        .unwrap();
+    display.set_offset(52, 40);
+    // initialize
+    display.init(&mut Delay {}).await.unwrap();
 
-    let mut display = {
-        let pins = (Some(gpiob.pb13), SPI2::NoMiso, Some(gpiob.pb15));
-        let spi_mode = Mode {
-            polarity: Polarity::IdleLow,
-            phase: Phase::CaptureOnFirstTransition,
-        };
-        let spi = dp.SPI2.spi(pins, spi_mode, 18.MHz(), &mut rcc);
-        // Set up the DMA device
-        // let dma = dp.DMA1.split(&mut rcc);
+    info!("init displayer3");
+    // display.clear_regions();
+    // display.clear_screen(Rgb565::YELLOW.).unwrap();
+    // set default orientation
+    display.clear(Rgb565::BLACK).unwrap();
 
-        // Connect the SPI device to the DMA
-        // let spi = spi.with_rx_tx_dma(dma.4, dma.5);
-        // let spi = spi.with_rx_dma(dma.4);
-        // let spi_dma = spi.with_tx_dma(dma.5);
+    info!("draw");
+    let style = PrimitiveStyleBuilder::new()
+        .stroke_width(5)
+        .stroke_color(Rgb565::GREEN)
+        .fill_color(Rgb565::BLACK)
+        .build();
 
-        // let mut buf = [0u8; 12];
-        // let transfer = spi_dma.write(&buf);
-        // let (_buffer, _spi_dma) = transfer.wait();
-        // let (pa15, pb3, pb4) = afio.mapr.disable_jtag(gpioa.pa15, gpiob.pb3, gpiob.pb4);
-        info!("init displayer1");
-        let dc = gpioa.pa9.into_push_pull_output(&mut gpioa.crh);
-        let cs = gpioa.pa10.into_push_pull_output(&mut gpioa.crh);
-        let rst = gpioa.pa8.into_push_pull_output(&mut gpioa.crh);
-        let blk = gpiob.pb12.into_push_pull_output(&mut gpiob.crh);
-        // blk.set_high();
-        info!("init displayer2");
-        let mut display = ST7789::new(spi, dc, cs, Some(rst), Some(blk), true, 240, 135);
-        display.set_orientation(Orientation::Landscape).unwrap();
-        display.set_offset(52, 40);
-        // initialize
-        display.init(&mut delay).unwrap();
-
-        info!("init displayer3");
-        // display.clear_regions();
-        // display.clear_screen(Rgb565::YELLOW.).unwrap();
-        // set default orientation
-        display.clear(Rgb565::BLACK).unwrap();
-        info!("draw");
-        let style = PrimitiveStyleBuilder::new()
-            .stroke_width(5)
-            .stroke_color(Rgb565::GREEN)
-            .fill_color(Rgb565::BLACK)
-            .build();
-
-        RoundedRectangle::with_equal_corners(
-            Rectangle::new(Point::new(14, 16), Size::new(100, 40)),
-            Size::new(12, 12),
-        )
-        .into_styled(style)
+    RoundedRectangle::with_equal_corners(
+        Rectangle::new(Point::new(14, 16), Size::new(100, 40)),
+        Size::new(12, 12),
+    )
+    .into_styled(style)
+    .draw(&mut display)
+    .unwrap();
+    let text_style = MonoTextStyleBuilder::new()
+        .font(&FONT_10X20)
+        .text_color(Rgb565::YELLOW)
+        .build();
+    Text::with_baseline("Hello", Point::new(43, 26), text_style, Baseline::Top)
         .draw(&mut display)
         .unwrap();
-        let text_style = MonoTextStyleBuilder::new()
-            .font(&FONT_10X20)
-            .text_color(Rgb565::YELLOW)
-            .build();
-        Text::with_baseline("Hello", Point::new(43, 26), text_style, Baseline::Top)
-            .draw(&mut display)
-            .unwrap();
-        display
-    };
     let mut i = 0;
     use core::fmt::Write;
     let line_style = PrimitiveStyle::with_stroke(Rgb565::GREEN, 1);
@@ -134,39 +143,80 @@ fn main() -> ! {
         .font(&FONT_10X20)
         .text_color(Rgb565::WHITE)
         .build();
-    // let mut pwr = dp.PWR;
-    // let mut bkp = dp.BKP.constrain(&mut pwr, &mut rcc);
-    // let rtc = Rtc::new(dp.RTC, &mut bkp, &mut rcc);
-    let mono = MonoTimer::new(cp.DWT, cp.DCB, &clocks);
-    let frequency = mono.frequency();
-    let colors = [
-        Rgb565::RED,
-        Rgb565::GREEN,
-        Rgb565::BLUE,
-        Rgb565::YELLOW,
-        Rgb565::MAGENTA,
-        Rgb565::CYAN,
-    ];
-    let size = 200;
-    let mut sp_str = String::<24>::new();
+    // let color = Rgb565::RED;
+    // display.set_pixel(12, 12, color).unwrap();
+
     let mut fps = 0;
+    let colors = [
+        Rgb565::RED.into_storage(),
+        Rgb565::GREEN.into_storage(),
+        Rgb565::BLUE.into_storage(),
+        Rgb565::YELLOW.into_storage(),
+        Rgb565::MAGENTA.into_storage(),
+        Rgb565::CYAN.into_storage(),
+    ];
+    // let colors = [
+    //     Rgb565::RED,
+    //     Rgb565::GREEN,
+    //     Rgb565::BLUE,
+    //     Rgb565::YELLOW,
+    //     Rgb565::MAGENTA,
+    //     Rgb565::CYAN,
+    // ];
+    let size = 1000;
+    let mut sp_str = String::<24>::new();
     loop {
-        let now = mono.now();
+        let now = Instant::now();
         for j in 0..size {
             display
-                .clear_screen(colors[j % colors.len()].into_storage())
+                .clear_screen(colors[j % colors.len()])
+                .await
                 .unwrap();
             // display.clear(colors[j % colors.len()]).unwrap();
         }
-        fps = size as usize / (now.elapsed() as usize / frequency.to_Hz() as usize);
+        fps = 1000 * size as usize / now.elapsed().as_millis() as usize;
         info!("FPS:{}", fps);
         sp_str.clear();
-        core::write!(sp_str, "count:{} , FPS:{}", i, fps).unwrap();
-        Text::with_baseline(sp_str.as_str(), Point::new(0, 0), text_style, Baseline::Top)
-            .draw(&mut display)
-            .unwrap();
 
+        // for y in 0..135 {
+        //     display
+        //         .set_pixels(0, y, 240, 135, [Rgb565::BLUE; 240].into_iter())
+        //         .unwrap();
+        // }
+
+        core::write!(sp_str, "count:{} , FPS:{}", i, fps).unwrap();
+        RoundedRectangle::with_equal_corners(
+            Rectangle::new(Point::new(0, 40), Size::new(240, 50)),
+            Size::new(12, 12),
+        )
+        .into_styled(style)
+        .draw(&mut display)
+        .unwrap();
+        Text::with_baseline(
+            sp_str.as_str(),
+            Point::new(20, 50),
+            text_style,
+            Baseline::Top,
+        )
+        .draw(&mut display)
+        .unwrap();
         i += size;
-        delay.delay_ms(1000_u16);
+        Timer::after_millis(1000).await
+    }
+}
+
+pub struct NoCsPin;
+
+impl ErrorType for NoCsPin {
+    type Error = Infallible;
+}
+
+impl OutputPin for NoCsPin {
+    fn set_low(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn set_high(&mut self) -> Result<(), Self::Error> {
+        Ok(())
     }
 }

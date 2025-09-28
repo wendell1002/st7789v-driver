@@ -1,21 +1,23 @@
 [package]
 edition = "2021"
 readme = "README.md"
-name = "st7789v-driver"
+name = "embassy-st7789v-driver"
 version = "0.2.0"
-description = "ST7789 TFT LCD driver with embedded-graphics support"
+description = "ST7789 TFT LCD embassy async driver with embedded-graphics support"
 license = "MIT"
 repository = "https://github.com/wendell1002/ST7789v-driver"
-keywords = ["embedded-hal-driver", "st7789", "display", "on_std"]
+keywords = ["embassy-async-hal-driver", "st7789", "display", "on_std", "async"]
 documentation = "https://docs.rs/st7789v-driver"
 
 [dependencies]
+embedded-hal-async = { version = "1.0" }
+embassy-futures = { version = "0.1.0" }
 embedded-graphics-core = "0.4.0"
-embedded-hal = "0.2.7"
-heapless = "0.7.17"
+embedded-hal = "1.0.0"
+heapless = "0.9.1"
 [lib]
 path = "src/lib.rs"
-name = "st7789v_driver"
+name = "embassy_st7789v_driver"
 test = false
 bench = false
 
