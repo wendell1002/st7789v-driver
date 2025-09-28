@@ -6,6 +6,7 @@ This is a Rust driver library for ST7789 displays using embassy，embedded_graph
 
 These features are enabled by default:
 
+- embassy support
 - `graphics` - embedded-graphics support: pulls in [embedded-graphics](https://crates.io/crates/embedded-graphics) dependency
 - `batch` - batch-drawing optimization: pulls in [heapless](https://crates.io/crates/heapless) dependency and allocates 300 bytes for frame buffer in the driver
 - FrameBuffer
@@ -237,7 +238,6 @@ impl OutputPin for NoCsPin {
         Ok(())
     }
 }
-
 ```
 
 dma max
