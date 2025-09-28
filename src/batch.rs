@@ -1,22 +1,20 @@
 //! Original code from: https://github.com/lupyuen/piet-embedded/blob/master/piet-embedded-graphics/src/batch.rs
 //! Batch the pixels to be rendered into Pixel Rows and Pixel Blocks (contiguous Pixel Rows).
 //! This enables the pixels to be rendered efficiently as Pixel Blocks, which may be transmitted in a single Non-Blocking SPI request.
-use crate::st7789::ST7789;
+use crate::st7789::st7789::ST7789;
+use embedded_graphics::{pixelcolor::Rgb565, prelude::*};
 use embedded_graphics_core::pixelcolor::raw::RawU16;
-use embedded_graphics_core::{pixelcolor::Rgb565, prelude::*};
 use embedded_hal::blocking::spi::*;
 use embedded_hal::digital::v2::OutputPin;
-pub trait DrawBatch<SPI, T>
+pub trait DrawBatch<T>
 where
-    SPI: Write<u8> + Transfer<u8>,
     T: IntoIterator<Item = Pixel<Rgb565>>,
 {
     fn draw_batch(&mut self, item_pixels: T) -> Result<(), ()>;
 }
 
-impl<SPI, DC, CS, RST, BLK, T> DrawBatch<SPI, T> for ST7789<SPI, DC, CS, RST, BLK>
+impl<DC, CS, RST, BLK, T> DrawBatch<T> for ST7789<DC, CS, RST, BLK>
 where
-    SPI: Write<u8> + Transfer<u8>,
     DC: OutputPin,
     CS: OutputPin,
     RST: OutputPin,

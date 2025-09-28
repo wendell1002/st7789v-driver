@@ -1,8 +1,7 @@
+use crate::st7789::cmd::Commands;
+use crate::st7789::st7789::ST7789;
 use embedded_hal::blocking::spi::*;
 use embedded_hal::digital::v2::OutputPin;
-
-use crate::cmd::Commands;
-use crate::st7789::ST7789;
 
 /// Structure to represent a region.
 #[derive(Copy, Clone, Default, PartialEq, Eq)]
@@ -36,9 +35,8 @@ pub trait RegionExt {
     ) -> Result<(), ()>;
 }
 
-impl<SPI, DC, CS, RST, BLK> RegionExt for ST7789<SPI, DC, CS, RST, BLK>
+impl<DC, CS, RST, BLK> RegionExt for ST7789<DC, CS, RST, BLK>
 where
-    SPI: Write<u8> + Transfer<u8>,
     DC: OutputPin,
     CS: OutputPin,
     RST: OutputPin,

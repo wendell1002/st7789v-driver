@@ -1,10 +1,19 @@
+#![no_std]
+
+use core::slice;
+
+use defmt::info;
 use embedded_hal::blocking::delay::DelayUs;
 use embedded_hal::blocking::spi::*;
 use embedded_hal::blocking::{delay::DelayMs, spi};
 use embedded_hal::digital::v2::OutputPin;
+use stm32f1xx_hal::dma::dma1::{C4, C5};
+use stm32f1xx_hal::dma::{TransferPayload, TxDma, WriteDma, *};
+use stm32f1xx_hal::pac::SPI2;
+use stm32f1xx_hal::spi::{Instance, Spi};
 
-use crate::cmd::Commands;
-use crate::region::Region;
+use crate::st7789::cmd::Commands;
+use crate::st7789::region::Region;
 
 pub const HORIZONTAL: u16 = 0;
 pub const VERTICAL: u16 = 1;
@@ -26,18 +35,24 @@ impl Default for Orientation {
         Self::Portrait
     }
 }
-
+pub const CHUNK_SIZE: usize = 240;
+// Spi<Periph<RegisterBlock, 1073756160>, u8>
+// TxDma<Spi<Periph<RegisterBlock, 1073756160>, u8>, Ch<Periph<RegisterBlock, 1073872896>, 4>>
+// TxDma<Periph<RegisterBlock, 1073756160>, Ch<Periph<RegisterBlock, 1073872896>, 4>>
+type SpiTxDma = TxDma<Spi<SPI2, u8>, C5>;
 /// Driver for the ST7789 display.
-pub struct ST7789<SPI, DC, CS, RST, BLK>
+pub struct ST7789<DC, CS, RST, BLK>
 where
-    SPI: Write<u8> + Transfer<u8>,
+    // B: embedded_dma::ReadBuffer<Word = u8>,
+    // SPI: Instance + TransferPayload,
     DC: OutputPin,
     CS: OutputPin,
     RST: OutputPin,
     BLK: OutputPin,
 {
+    // _marker: core::marker::PhantomData<B>,
     /// SPI interface.
-    spi: SPI,
+    // spi: SPI,
 
     /// Data/command pin.
     dc: DC,
@@ -49,6 +64,15 @@ where
     rst: Option<RST>,
     /// Backlight pin.
     blk: Option<BLK>,
+    dma: Option<SpiTxDma>,
+    cmd_buf: Option<&'static mut [u8; 1]>,
+    data_buf: Option<&'static mut [u8; 1]>,
+    data_2_buf: Option<&'static mut [u8; 2]>,
+    data_3_buf: Option<&'static mut [u8; 3]>,
+    data_4_buf: Option<&'static mut [u8; 4]>,
+    data_8_buf: Option<&'static mut [u8; 8]>,
+    //TxDma<Spi<Periph<RegisterBlock, 1073756160>, u8>, Ch<Periph<RegisterBlock, 1073872896>, 4>>
+    chunk_buffer: Option<&'static mut [u8; CHUNK_SIZE]>,
 
     /// Whether the display is RGB (true) or BGR (false).
     _rgb: bool,
@@ -62,9 +86,8 @@ where
     orientation: Orientation,
 }
 
-impl<SPI, DC, CS, RST, BLK> ST7789<SPI, DC, CS, RST, BLK>
+impl<DC, CS, RST, BLK> ST7789<DC, CS, RST, BLK>
 where
-    SPI: Write<u8> + Transfer<u8>,
     DC: OutputPin,
     CS: OutputPin,
     RST: OutputPin,
@@ -82,7 +105,14 @@ where
     /// * `width` - Width of the display.
     /// * `height` - Height of the display.
     pub fn new(
-        spi: SPI,
+        dma: SpiTxDma,
+        buffer: &'static mut [u8; CHUNK_SIZE],
+        cmd_buf: &'static mut [u8; 1],
+        data_buf: &'static mut [u8; 1],
+        data_2_buf: &'static mut [u8; 2],
+        data_3_buf: &'static mut [u8; 3],
+        data_4_buf: &'static mut [u8; 4],
+        data_8_buf: &'static mut [u8; 8],
         dc: DC,
         cs: CS,
         rst: Option<RST>,
@@ -92,7 +122,14 @@ where
         height: u32,
     ) -> Self {
         ST7789 {
-            spi,
+            chunk_buffer: Some(buffer),
+            dma: Some(dma),
+            cmd_buf: Some(cmd_buf),
+            data_buf: Some(data_buf),
+            data_2_buf: Some(data_2_buf),
+            data_3_buf: Some(data_3_buf),
+            data_4_buf: Some(data_4_buf),
+            data_8_buf: Some(data_8_buf),
             dc,
             cs,
             rst,
@@ -282,12 +319,20 @@ where
         self.cs.set_high().map_err(|_| ())?;
         self.dc.set_low().map_err(|_| ())?;
         self.cs.set_low().map_err(|_| ())?;
-        self.spi.write(&[command]).map_err(|_| ())?;
+        let mut spi_dma = self.dma.take().unwrap();
+        let mut cmd_buf = self.cmd_buf.take().unwrap();
+        cmd_buf[0] = command;
+
+        let transfer = spi_dma.write(cmd_buf);
+        (cmd_buf, spi_dma) = transfer.wait();
+        self.dma = Some(spi_dma);
+        self.cmd_buf = Some(cmd_buf);
         if !params.is_empty() {
             self.start_data()?;
             self.write_data(params)?;
         }
         self.cs.set_high().map_err(|_| ())?;
+
         Ok(())
     }
 
@@ -317,11 +362,121 @@ where
         self.cs.set_high().map_err(|_| ())?;
         self.dc.set_high().map_err(|_| ())?;
         self.cs.set_low().map_err(|_| ())?;
-        self.spi.write(data).map_err(|_| ())?;
+        match data.len() {
+            1 => self.write_1_bytes(data)?,
+            2 => self.write_2_bytes(data)?,
+            3 => self.write_3_bytes(data)?,
+            4 => self.write_4_bytes(data)?,
+            8 => self.write_8_bytes(data)?,
+            _ => Ok(())?,
+        };
+        if data.len() > 4 && data.len() < 8 {
+            self.write_5_7_bytes(data)?;
+        }
+        if data.len() > 8 {
+            let chunck_size = data.len() / 8;
+
+            for i in 0..chunck_size {
+                self.write_8_bytes(&data[i * 8..i * 8 + 8])?
+            }
+            match data.len() {
+                1 => self.write_1_bytes(&data[chunck_size * 8..])?,
+                2 => self.write_2_bytes(&data[chunck_size * 8..])?,
+                3 => self.write_3_bytes(&data[chunck_size * 8..])?,
+                4 => self.write_4_bytes(&data[chunck_size * 8..])?,
+                _ => self.write_5_7_bytes(&data[chunck_size * 8..])?,
+            };
+        }
+
         self.cs.set_high().map_err(|_| ())?;
+
         Ok(())
     }
 
+    pub(crate) fn write_5_7_bytes(&mut self, data: &[u8]) -> Result<(), ()> {
+        let chunck_size = data.len() / 4;
+
+        for i in 0..chunck_size {
+            self.write_4_bytes(&data[i * 4..i * 4 + 4])?
+        }
+        match data.len() {
+            1 => self.write_1_bytes(&data[chunck_size * 4..])?,
+            2 => self.write_2_bytes(&data[chunck_size * 4..])?,
+            3 => self.write_3_bytes(&data[chunck_size * 4..])?,
+            _ => Ok(())?,
+        };
+        Ok(())
+    }
+
+    pub(crate) fn write_1_bytes(&mut self, data: &[u8]) -> Result<(), ()> {
+        let mut spi_dma = self.dma.take().unwrap();
+        let mut data_buf = self.data_buf.take().unwrap();
+        data_buf.copy_from_slice(data);
+        let transfer = spi_dma.write(data_buf);
+        (data_buf, spi_dma) = transfer.wait();
+        self.dma = Some(spi_dma);
+        self.data_buf = Some(data_buf);
+        Ok(())
+    }
+
+    pub(crate) fn write_2_bytes(&mut self, data: &[u8]) -> Result<(), ()> {
+        let mut spi_dma = self.dma.take().unwrap();
+        let mut data_buf = self.data_2_buf.take().unwrap();
+        data_buf.copy_from_slice(data);
+        let transfer = spi_dma.write(data_buf);
+        (data_buf, spi_dma) = transfer.wait();
+        self.dma = Some(spi_dma);
+        self.data_2_buf = Some(data_buf);
+        Ok(())
+    }
+
+    pub(crate) fn write_3_bytes(&mut self, data: &[u8]) -> Result<(), ()> {
+        let mut spi_dma = self.dma.take().unwrap();
+        let mut data_buf = self.data_3_buf.take().unwrap();
+        data_buf.copy_from_slice(data);
+        let transfer = spi_dma.write(data_buf);
+        (data_buf, spi_dma) = transfer.wait();
+        self.dma = Some(spi_dma);
+        self.data_3_buf = Some(data_buf);
+        Ok(())
+    }
+    pub(crate) fn write_4_bytes(&mut self, data: &[u8]) -> Result<(), ()> {
+        let mut spi_dma = self.dma.take().unwrap();
+        let mut data_buf = self.data_4_buf.take().unwrap();
+        data_buf.copy_from_slice(data);
+        let transfer = spi_dma.write(data_buf);
+        (data_buf, spi_dma) = transfer.wait();
+        self.dma = Some(spi_dma);
+        self.data_4_buf = Some(data_buf);
+        Ok(())
+    }
+    pub(crate) fn write_8_bytes(&mut self, data: &[u8]) -> Result<(), ()> {
+        let mut spi_dma = self.dma.take().unwrap();
+        let mut data_buf = self.data_8_buf.take().unwrap();
+        data_buf.copy_from_slice(data);
+        let transfer = spi_dma.write(data_buf);
+        (data_buf, spi_dma) = transfer.wait();
+        self.dma = Some(spi_dma);
+        self.data_8_buf = Some(data_buf);
+        Ok(())
+    }
+
+    pub(crate) fn write_chuck_data(&mut self, data: &[u8; CHUNK_SIZE]) -> Result<(), ()> {
+        self.cs.set_high().map_err(|_| ())?;
+        self.dc.set_high().map_err(|_| ())?;
+        self.cs.set_low().map_err(|_| ())?;
+        let mut spi_dma = self.dma.take().unwrap();
+        let mut chunk_buffer = self.chunk_buffer.take().unwrap();
+        chunk_buffer.copy_from_slice(data);
+
+        let transfer = spi_dma.write(chunk_buffer);
+        (chunk_buffer, spi_dma) = transfer.wait();
+
+        self.cs.set_high().map_err(|_| ())?;
+        self.dma = Some(spi_dma);
+        self.chunk_buffer = Some(chunk_buffer);
+        Ok(())
+    }
     /// Writes a data word to the display.
     ///
     /// This function writes a 16-bit word to the display.
@@ -411,23 +566,42 @@ where
         self.write_command(Commands::RamWr as u8, &[])?;
         self.start_data()?;
 
+        // let mut chunk_buffer = self.chunk_buffer.take().unwrap();
+        // let buf_len = chunk_buffer.len();
+        // for i in 0..buf_len {
+        //     chunk_buffer[i * 2] = color_high;
+        //     chunk_buffer[i * 2 + 1] = color_low;
+        // }
+        // // Write data in chunks
+        // let total_pixels = (self.width * self.height) as usize;
+        // let full_chunks = total_pixels / CHUNK_SIZE;
+        // let remaining_pixels = total_pixels % CHUNK_SIZE;
+
+        // for _ in 0..full_chunks {
+        //     self.write_chuck_data(&chunk_buffer)?;
+        // }
+
+        // if remaining_pixels > 0 {
+        //     self.write_data(&chunk_buffer[0..(remaining_pixels * 2)])?;
+        // }
+        let chunk_size = CHUNK_SIZE / 2;
         // Define a constant for the chunk size
-        const CHUNK_SIZE: usize = 240;
-        let mut chunk = [0u8; CHUNK_SIZE * 2];
+        let mut chunk = [0u8; CHUNK_SIZE];
 
         // Fill the chunk with the color data
-        for i in 0..CHUNK_SIZE {
+        for i in 0..chunk_size {
             chunk[i * 2] = color_high;
             chunk[i * 2 + 1] = color_low;
         }
 
         // Write data in chunks
         let total_pixels = (self.width * self.height) as usize;
-        let full_chunks = total_pixels / CHUNK_SIZE;
-        let remaining_pixels = total_pixels % CHUNK_SIZE;
+        let full_chunks = total_pixels / chunk_size;
+        let remaining_pixels = total_pixels % chunk_size;
 
         for _ in 0..full_chunks {
-            self.write_data(&chunk)?;
+            // self.write_data(&chunk)?;
+            self.write_chuck_data(&chunk)?;
         }
 
         if remaining_pixels > 0 {
@@ -540,9 +714,15 @@ where
         self.cs.set_high().map_err(|_| ())?;
         self.dc.set_high().map_err(|_| ())?;
         self.cs.set_low().map_err(|_| ())?;
-        self.spi.write(buffer).map_err(|_| ())?;
-        self.cs.set_high().map_err(|_| ())?;
+        let mut spi_dma = self.dma.take().unwrap();
+        let mut data_buf = self.data_buf.take().unwrap();
+        data_buf.copy_from_slice(buffer);
 
+        let transfer = spi_dma.write(data_buf);
+        (data_buf, spi_dma) = transfer.wait();
+        self.cs.set_high().map_err(|_| ())?;
+        self.dma.replace(spi_dma);
+        self.data_buf.replace(data_buf);
         Ok(())
     }
 }

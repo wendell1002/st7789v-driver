@@ -1,10 +1,10 @@
-use embedded_graphics_core::{
+use embedded_graphics::{
     pixelcolor::{raw::RawU16, Rgb565},
     prelude::{DrawTarget, IntoStorage as _, OriginDimensions, Point, Size},
     Pixel,
 };
 
-use crate::region::Region;
+use crate::st7789::region::Region;
 
 /// A structure representing a frame buffer.
 pub struct FrameBuffer<'a> {
